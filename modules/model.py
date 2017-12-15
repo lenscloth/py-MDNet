@@ -3,15 +3,18 @@ import scipy.io
 import numpy as np
 from collections import OrderedDict
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
-import torch
+from torch.nn.functional import grid_sample
+
 
 def append_params(params, module, prefix):
     for child in module.children():
         for k,p in child._parameters.iteritems():
-            if p is None: continue
+            if p is None:
+                continue
             
             if isinstance(child, nn.BatchNorm2d):
                 name = prefix + '_bn_' + k
@@ -22,6 +25,48 @@ def append_params(params, module, prefix):
                 params[name] = p
             else:
                 raise RuntimeError("Duplicated param name: %s" % (name))
+
+class AffineSpatialTransform(nn.Module):
+    def __init__(self, OH, OW):
+        super(AffineSpatialTransform, self).__init__()
+        hs = torch.linspace(-1, 1, steps=OH)
+        ws = torch.linspace(-1, 1, steps=OW)
+
+        hs = hs.unsqueeze(1).expand(OH, OW)
+        ws = ws.unsqueeze(0).expand(OH, OW)
+        ones = torch.ones(OH, OW)
+
+        t = torch.stack([ws, hs, ones], dim=0)
+        self.register_buffer("t", t)
+        self.h = OH
+        self.w = OW
+
+        # vertices = torch.FloatTensor([[-1, -1, 1],
+        #                            [-1, 1, 1],
+        #                            [1, 1, 1],
+        #                            [1, -1, 1]]).unsqueeze(2)
+        # self.register_buffer("vertices", vertices)
+
+    def forward(self, input, theta):
+        theta = theta.unsqueeze(1)
+        t = Variable(self.t.view(1, 3, -1))
+        #v = Variable(self.vertices)
+
+        source_grid = torch.matmul(theta, t)
+        source_grid = source_grid.squeeze(1).view(input.size(0), 2, self.h, self.w)
+        source_grid = source_grid.permute(0, 2, 3, 1)
+        out = grid_sample(input, source_grid)
+
+        # theta = theta.squeeze(1)
+        # vertices_out = torch.matmul(theta, v).squeeze(3)
+
+        # ih = input.size(2)
+        # iw = input.size(3)
+        # x_coord = (vertices_out[..., 0] + 1) * iw / 2
+        # y_coord = (vertices_out[..., 1] + 1) * ih / 2
+        # vertices_out = torch.stack((x_coord, y_coord), dim=2)
+
+        return out
 
 
 class LRN(nn.Module):
@@ -44,9 +89,11 @@ class LRN(nn.Module):
 
 
 class MDNet(nn.Module):
-    def __init__(self, model_path=None, K=1):
+    def __init__(self, model_path=None, K=1, en_stn=False, zero_init=True):
         super(MDNet, self).__init__()
         self.K = K
+        self.en_stn = en_stn
+        self.stn = AffineSpatialTransform(5, 5)
         self.layers = nn.Sequential(OrderedDict([
                 ('conv1', nn.Sequential(nn.Conv2d(3, 96, kernel_size=7, stride=2),
                                         nn.ReLU(),
@@ -56,6 +103,9 @@ class MDNet(nn.Module):
                                         nn.ReLU(),
                                         LRN(),
                                         nn.MaxPool2d(kernel_size=3, stride=2))),
+                ('conv_loc1', nn.Sequential(nn.Conv2d(256, 64, kernel_size=3),
+                                            nn.ReLU())),
+                ('conv_loc2', nn.Sequential(nn.Conv2d(64, 6, kernel_size=3))),
                 ('conv3', nn.Sequential(nn.Conv2d(256, 512, kernel_size=3, stride=1),
                                         nn.ReLU())),
                 ('fc4',   nn.Sequential(nn.Dropout(0.5),
@@ -64,7 +114,9 @@ class MDNet(nn.Module):
                 ('fc5',   nn.Sequential(nn.Dropout(0.5),
                                         nn.Linear(512, 512),
                                         nn.ReLU()))]))
-        
+        if zero_init:
+            self.layers[3][0].weight.data = torch.zeros(6, 64, 3, 3)
+            self.layers[3][0].bias.data = torch.FloatTensor([1, 0, 0, 0, 1, 0])
         self.branches = nn.ModuleList([nn.Sequential(nn.Dropout(0.5), 
                                                      nn.Linear(512, 2)) for _ in range(K)])
         
@@ -107,9 +159,21 @@ class MDNet(nn.Module):
             if name == in_layer:
                 run = True
             if run:
-                x = module(x)
-                if name == 'conv3':
-                    x = x.view(x.size(0),-1)
+                if name == "conv_loc1":
+                    if self.en_stn:
+                        p = module(x)
+                elif name == "conv_loc2":
+                    if self.en_stn:
+                        p = module(p)
+                        p = p.view(x.size(0), 2, 3)
+                elif name == "conv3":
+                    if self.en_stn:
+                        x = self.stn(x, p)
+                    x = module(x)
+                    x = x.view(x.size(0), -1)
+                else:
+                    x = module(x)
+
                 if name == out_layer:
                     return x
         
@@ -131,10 +195,12 @@ class MDNet(nn.Module):
         # copy conv weights
         for i in range(3):
             weight, bias = mat_layers[i*4]['weights'].item()[0]
+
+            if i == 2:
+                i = i + 2
             self.layers[i][0].weight.data = torch.from_numpy(np.transpose(weight, (3,2,0,1)))
             self.layers[i][0].bias.data = torch.from_numpy(bias[:,0])
 
-    
 
 class BinaryLoss(nn.Module):
     def __init__(self):

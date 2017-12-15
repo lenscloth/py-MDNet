@@ -22,6 +22,8 @@ def set_optimizer(model, lr_base, lr_mult=opts['lr_mult'], momentum=opts['moment
         for l, m in lr_mult.iteritems():
             if k.startswith(l):
                 lr = lr_base * m
+            if k.startswith("conv_loc"):
+                lr = lr_base * 0.1
         param_list.append({'params': [p], 'lr':lr})
     optimizer = optim.SGD(param_list, lr = lr, momentum=momentum, weight_decay=w_decay)
     return optimizer

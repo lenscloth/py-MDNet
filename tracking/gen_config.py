@@ -1,17 +1,14 @@
 import os
-import json
 import numpy as np
 
-def gen_config(args):
+def gen_config(seq_home, seq_name, save_fig, display):
 
-    if args.seq != '':
+    if seq_name != '':
         # generate config from a sequence name
 
-        seq_home = '../dataset/OTB'
         save_home = '../result_fig'
         result_home = '../result'
-        
-        seq_name = args.seq
+
         img_dir = os.path.join(seq_home, seq_name, 'img')
         gt_path = os.path.join(seq_home, seq_name, 'groundtruth_rect.txt')
 
@@ -19,7 +16,13 @@ def gen_config(args):
         img_list.sort()
         img_list = [os.path.join(img_dir,x) for x in img_list]
 
-        gt = np.loadtxt(gt_path,delimiter=',')
+        with open(gt_path, "r") as f:
+            first_line = f.readline()
+            if "," in first_line:
+                gt = np.loadtxt(gt_path,delimiter=',')
+            else:
+                gt = np.loadtxt(gt_path)
+
         init_bbox = gt[0]
         
         savefig_dir = os.path.join(save_home,seq_name)
@@ -27,22 +30,11 @@ def gen_config(args):
         if not os.path.exists(result_dir):
             os.makedirs(result_dir)
         result_path = os.path.join(result_dir,'result.json')
-
-    elif args.json != '':
-        # load config from a json file
-
-        param = json.load(open(args.json,'r'))
-        seq_name = param['seq_name']
-        img_list = param['img_list']
-        init_bbox = param['init_bbox']
-        savefig_dir = param['savefig_dir']
-        result_path = param['result_path']
-        gt = None
         
-    if args.savefig:
+    if save_fig:
         if not os.path.exists(savefig_dir):
             os.makedirs(savefig_dir)
     else:
         savefig_dir = ''
 
-    return img_list, init_bbox, gt, savefig_dir, args.display, result_path
+    return img_list, init_bbox, gt, savefig_dir, display, result_path
